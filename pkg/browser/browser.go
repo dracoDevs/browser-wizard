@@ -12,15 +12,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bosniankicks/greenlight/pkg/page"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/bosniankicks/greenlight/pkg/page"
+	"github.com/mafredri/cdp"
 )
 
 type Browser struct {
 	execPath     string
 	wsEndpoint   string
-	conn         *websocket.Conn
+	wsConn       *websocket.Conn // renamed to avoid conflict
 	cmd          *exec.Cmd
 	context      context.Context
 	cancel       context.CancelFunc
@@ -29,6 +30,9 @@ type Browser struct {
 	messageMutex sync.Mutex
 	pid          int
 	isHeadless   bool
+
+	conn   *cdp.Conn       // this is the CDP connection
+	events chan *cdp.Event // CDP event channel
 }
 
 func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
@@ -64,7 +68,7 @@ func (b *Browser) launch(startURL string) error {
 		args = append(args, "--headless=new")
 	}
 
-	b.cmd = exec.CommandContext(b.context, b.execPath, args...)
+	b.cmd = exec.CommandContext(b.wsConnext, b.execPath, args...)
 	if err := b.cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start browser: %v", err)
 	}
@@ -96,14 +100,14 @@ func (b *Browser) attachToPage() error {
 	for _, page := range pages {
 		if page["type"] == "page" && page["url"] != "" {
 			if wsURL, ok := page["webSocketDebuggerUrl"].(string); ok {
-				if b.conn != nil {
-					b.conn.Close()
+				if b.wsConn != nil {
+					b.wsConn.Close()
 				}
 				conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 				if err != nil {
 					return fmt.Errorf("failed to connect to page WebSocket: %v", err)
 				}
-				b.conn = conn
+				b.wsConn = conn
 				b.wsEndpoint = wsURL
 				log.Printf("Connected to page: %s", page["url"])
 				return nil
@@ -124,18 +128,18 @@ func (b *Browser) SendCommandWithResponse(method string, params map[string]inter
 		"params": params,
 	}
 
-	if b.conn == nil {
+	if b.wsConn == nil {
 		if err := b.attachToPage(); err != nil {
 			return nil, fmt.Errorf("failed to reconnect WebSocket: %v", err)
 		}
 	}
 
-	if err := b.conn.WriteJSON(message); err != nil {
+	if err := b.wsConn.WriteJSON(message); err != nil {
 		return nil, fmt.Errorf("failed to send WebSocket message: %v", err)
 	}
 
 	for {
-		_, data, err := b.conn.ReadMessage()
+		_, data, err := b.wsConn.ReadMessage()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read WebSocket message: %v", err)
 		}
@@ -164,13 +168,13 @@ func (b *Browser) SendCommandWithoutResponse(method string, params map[string]in
 		"params": params,
 	}
 
-	if b.conn == nil {
+	if b.wsConn == nil {
 		if err := b.attachToPage(); err != nil {
 			return fmt.Errorf("failed to reconnect WebSocket: %v", err)
 		}
 	}
 
-	if err := b.conn.WriteJSON(message); err != nil {
+	if err := b.wsConn.WriteJSON(message); err != nil {
 		return fmt.Errorf("failed to send WebSocket message: %v", err)
 	}
 
@@ -178,15 +182,15 @@ func (b *Browser) SendCommandWithoutResponse(method string, params map[string]in
 }
 
 func (b *Browser) NewPage() *page.Page {
-	if b.conn == nil {
+	if b.wsConn == nil {
 		log.Fatal("WebSocket connection not established. Cannot create a new page.")
 	}
 	return page.NewPage(b)
 }
 
 func (b *Browser) RedLight() {
-	if b.conn != nil {
-		if err := b.conn.Close(); err != nil {
+	if b.wsConn != nil {
+		if err := b.wsConn.Close(); err != nil {
 			log.Printf("Error closing WebSocket: %v", err)
 		}
 	}
