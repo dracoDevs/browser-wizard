@@ -217,3 +217,7 @@ func (b *Browser) RedLight() {
 	b.cancel()
 	log.Println("Browser closed successfully.")
 }
+
+func (b *Browser) Listen() *CDPEvent {
+	return <-b.events
+}
