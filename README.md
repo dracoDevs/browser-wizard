@@ -94,6 +94,41 @@ page.YellowLight(5000)
 b.RedLight()
 ```
 
+## Iframe Monitoring
+
+Browser Wizard automatically monitors for new iframes every 2 seconds and maintains WebSocket connections to them:
+
+```go
+// Get list of active iframe connections
+iframes := b.GetIframeConnections()
+for _, wsURL := range iframes {
+    log.Printf("Active iframe: %s", wsURL)
+}
+
+// Send commands to specific iframes
+err := b.SendCommandToIframe(wsURL, "Runtime.evaluate", map[string]interface{}{
+    "expression": "document.title",
+})
+```
+
+This is particularly useful for:
+
+-   **Dynamic content**: Sites that load iframes via JavaScript
+-   **Anti-bot detection**: Some sites use iframes to load protected content
+-   **Cross-origin scraping**: Accessing content from different domains
+-   **SPA monitoring**: Single Page Applications that inject iframes dynamically
+
+## Performance Optimizations
+
+Browser Wizard includes several optimizations to handle high-traffic websites:
+
+-   **Increased WebSocket read limit**: 10MB (up from 512KB) to handle heavy network traffic
+-   **Larger event buffer**: 1000 events (up from 100) to prevent event dropping
+-   **Automatic reconnection**: Handles "read limit exceeded" errors gracefully
+-   **Selective event filtering**: Only process events you actually need
+-   **Network buffer optimization**: Configurable buffer sizes for different network scenarios
+-   **Automatic iframe monitoring**: Continuously checks for new iframes every 2 seconds
+
 # THIS IS A FORK
 
 All credit for the foundation of this project to https://github.com/bosniankicks/greenlight big thanks!

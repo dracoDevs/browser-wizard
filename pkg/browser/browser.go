@@ -40,12 +40,14 @@ type Browser struct {
 	listenOnce sync.Once
 	connMutex  sync.RWMutex
 
+	Iframes map[string]*websocket.Conn
+
 	responseChans map[int]chan map[string]interface{}
 	responseMutex sync.Mutex
 	readerCancel  context.CancelFunc
-}
 
-const eventChanSize = 100
+	iframeMonitorCancel context.CancelFunc
+}
 
 func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -57,7 +59,7 @@ func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
 		cancel:      cancel,
 		userDataDir: userDataDir,
 		isHeadless:  isHeadless,
-		eventChan:   make(chan Event, eventChanSize),
+		eventChan:   make(chan Event, 100),
 	}
 
 	if err := browser.launch(startURL); err != nil {
@@ -95,6 +97,7 @@ func (b *Browser) launch(startURL string) error {
 	}
 
 	b.startReader()
+	b.startIframeMonitor()
 
 	return nil
 }
@@ -112,41 +115,70 @@ func (b *Browser) attachToPage() error {
 		return fmt.Errorf("failed to decode JSON: %v", err)
 	}
 
+	// Track iframes
+	if b.Iframes == nil {
+		b.Iframes = make(map[string]*websocket.Conn)
+	}
+
 	for _, page := range pages {
-		if page["type"] == "page" && page["url"] != "" {
-			if wsURL, ok := page["webSocketDebuggerUrl"].(string); ok {
-				b.connMutex.Lock()
-				oldConn := b.conn
-				if oldConn != nil {
-					oldConn.Close()
-					b.conn = nil
-				}
-				b.connMutex.Unlock()
+		pageType, _ := page["type"].(string)
+		wsURL, _ := page["webSocketDebuggerUrl"].(string)
+		url, _ := page["url"].(string)
 
-				dialer := websocket.Dialer{
-					HandshakeTimeout: 10 * time.Second,
-				}
+		log.Println("Found page:", url, "Type:", pageType, "WebSocket URL:", wsURL)
 
-				conn, _, err := dialer.Dial(wsURL, nil)
-				if err != nil {
-					return fmt.Errorf("failed to connect to page WebSocket: %v", err)
-				}
-
+		if pageType == "iframe" && wsURL != "" {
+			// Manage iframe connections
+			b.connMutex.Lock()
+			if oldConn, ok := b.Iframes[wsURL]; ok && oldConn != nil {
+				oldConn.Close()
+			}
+			dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+			conn, _, err := dialer.Dial(wsURL, nil)
+			if err == nil {
 				conn.SetReadLimit(512 * 1024)
 				conn.SetPongHandler(func(string) error {
 					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 					return nil
 				})
-
-				b.connMutex.Lock()
-				b.conn = conn
-				b.wsEndpoint = wsURL
-				b.connMutex.Unlock()
-
-				log.Printf("Connected to page: %s", page["url"])
-				b.startReader()
-				return nil
+				b.Iframes[wsURL] = conn
+				log.Printf("Connected to iframe: %s", url)
+			} else {
+				log.Printf("Failed to connect to iframe WebSocket: %v", err)
 			}
+			b.connMutex.Unlock()
+			continue
+		}
+
+		if pageType == "page" && url != "" && wsURL != "" {
+			b.connMutex.Lock()
+			oldConn := b.conn
+			if oldConn != nil {
+				oldConn.Close()
+				b.conn = nil
+			}
+			b.connMutex.Unlock()
+
+			dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+			conn, _, err := dialer.Dial(wsURL, nil)
+			if err != nil {
+				return fmt.Errorf("failed to connect to page WebSocket: %v", err)
+			}
+
+			conn.SetReadLimit(512 * 1024)
+			conn.SetPongHandler(func(string) error {
+				conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+				return nil
+			})
+
+			b.connMutex.Lock()
+			b.conn = conn
+			b.wsEndpoint = wsURL
+			b.connMutex.Unlock()
+
+			log.Printf("Connected to page: %s", url)
+			b.startReader()
+			return nil
 		}
 	}
 	return fmt.Errorf("no suitable page found")
@@ -220,6 +252,42 @@ func (b *Browser) SendCommandWithResponse(method string, params map[string]inter
 	}
 }
 
+// SendCommandToIframe sends a command to a specific iframe
+func (b *Browser) SendCommandToIframe(wsURL string, method string, params map[string]interface{}) error {
+	b.connMutex.RLock()
+	conn, exists := b.Iframes[wsURL]
+	b.connMutex.RUnlock()
+
+	if !exists || conn == nil {
+		return fmt.Errorf("iframe connection not found: %s", wsURL)
+	}
+
+	b.messageMutex.Lock()
+	b.messageID++
+	id := b.messageID
+	b.messageMutex.Unlock()
+
+	message := map[string]interface{}{
+		"id":     id,
+		"method": method,
+		"params": params,
+	}
+
+	return conn.WriteJSON(message)
+}
+
+// GetIframeConnections returns a list of active iframe WebSocket URLs
+func (b *Browser) GetIframeConnections() []string {
+	b.connMutex.RLock()
+	defer b.connMutex.RUnlock()
+
+	urls := make([]string, 0, len(b.Iframes))
+	for wsURL := range b.Iframes {
+		urls = append(urls, wsURL)
+	}
+	return urls
+}
+
 func (b *Browser) SendCommandWithoutResponse(method string, params map[string]interface{}) error {
 	b.messageMutex.Lock()
 	b.messageID++
@@ -251,17 +319,6 @@ func (b *Browser) Listen() Event {
 	return <-b.eventChan
 }
 
-// dumpEventChan drains the event channel.
-func (b *Browser) dumpEventChan() {
-	for {
-		select {
-		case <-b.eventChan:
-		default:
-			return
-		}
-	}
-}
-
 func (b *Browser) startReader() {
 	if b.readerCancel != nil {
 		b.readerCancel()
@@ -282,12 +339,14 @@ func (b *Browser) startReader() {
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
+				// conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 				_, data, err := conn.ReadMessage()
 				if err != nil {
 					if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-						continue
+						continue // just a timeout, keep waiting
 					}
 					log.Printf("WebSocket reader error: %v", err)
+					// Mark the connection as dead so no further reads happen
 					b.connMutex.Lock()
 					if b.conn == conn {
 						b.conn.Close()
@@ -313,8 +372,7 @@ func (b *Browser) startReader() {
 					select {
 					case b.eventChan <- Event{Method: method, Params: params}:
 					default:
-						b.dumpEventChan()
-						b.eventChan <- Event{Method: method, Params: params}
+						// log.Printf("Event channel full, dropping event: %s", method)
 					}
 				}
 			}
@@ -330,6 +388,21 @@ func (b *Browser) NewPage() *page.Page {
 }
 
 func (b *Browser) RedLight() {
+	// Stop iframe monitor
+	if b.iframeMonitorCancel != nil {
+		b.iframeMonitorCancel()
+	}
+
+	// Close iframe connections
+	b.connMutex.Lock()
+	for wsURL, conn := range b.Iframes {
+		if conn != nil {
+			conn.Close()
+		}
+		delete(b.Iframes, wsURL)
+	}
+	b.connMutex.Unlock()
+
 	b.connMutex.Lock()
 	if b.conn != nil {
 		if err := b.conn.Close(); err != nil {
@@ -354,4 +427,86 @@ func (b *Browser) RedLight() {
 
 	b.cancel()
 	log.Println("Browser closed successfully.")
+}
+
+func (b *Browser) startIframeMonitor() {
+	if b.iframeMonitorCancel != nil {
+		b.iframeMonitorCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.iframeMonitorCancel = cancel
+
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				b.checkForNewIframes()
+			}
+		}
+	}()
+}
+
+func (b *Browser) checkForNewIframes() {
+	debugPort := "9229"
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%s/json", debugPort))
+	if err != nil {
+		log.Printf("Failed to fetch pages for iframe check: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var pages []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&pages); err != nil {
+		log.Printf("Failed to decode JSON for iframe check: %v", err)
+		return
+	}
+
+	b.connMutex.Lock()
+	defer b.connMutex.Unlock()
+
+	for _, page := range pages {
+		pageType, _ := page["type"].(string)
+		wsURL, _ := page["webSocketDebuggerUrl"].(string)
+		url, _ := page["url"].(string)
+
+		if pageType == "iframe" && wsURL != "" {
+			// Check if we already have a connection to this iframe
+			if _, exists := b.Iframes[wsURL]; !exists {
+				// New iframe found, connect to it
+				dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+				conn, _, err := dialer.Dial(wsURL, nil)
+				if err == nil {
+					conn.SetReadLimit(10 * 1024 * 1024) // 10MB limit
+					conn.SetPongHandler(func(string) error {
+						conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+						return nil
+					})
+					b.Iframes[wsURL] = conn
+					log.Printf("Connected to new iframe: %s", url)
+				} else {
+					log.Printf("Failed to connect to iframe WebSocket: %v", err)
+				}
+			}
+		}
+	}
+
+	// Clean up disconnected iframes
+	for wsURL, conn := range b.Iframes {
+		if conn == nil {
+			delete(b.Iframes, wsURL)
+			continue
+		}
+
+		// Check if connection is still alive
+		if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(time.Second)); err != nil {
+			log.Printf("Iframe connection lost, removing: %s", wsURL)
+			conn.Close()
+			delete(b.Iframes, wsURL)
+		}
+	}
 }

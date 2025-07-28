@@ -5,6 +5,5 @@ import (
 )
 
 func main() {
-	examples.TestWaitForNetworkStability()
-	// examples.TestHijackModifyRequest()
+	examples.TestIframeMonitoring()
 }
