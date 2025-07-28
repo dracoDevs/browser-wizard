@@ -125,8 +125,6 @@ func (b *Browser) attachToPage() error {
 		wsURL, _ := page["webSocketDebuggerUrl"].(string)
 		url, _ := page["url"].(string)
 
-		log.Println("Found page:", url, "Type:", pageType, "WebSocket URL:", wsURL)
-
 		if pageType == "iframe" && wsURL != "" {
 			// Manage iframe connections
 			b.connMutex.Lock()
