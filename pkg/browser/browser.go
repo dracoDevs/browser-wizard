@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bosniankicks/greenlight/pkg/page"
+	"github.com/dracoDevs/browser-wizard/pkg/page"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/mafredri/cdp/rpcc"
