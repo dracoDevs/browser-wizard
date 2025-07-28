@@ -15,8 +15,13 @@ import (
 	"github.com/bosniankicks/greenlight/pkg/page"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/mafredri/cdp"
+	"github.com/mafredri/cdp/rpcc"
 )
+
+type CDPEvent struct {
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+}
 
 type Browser struct {
 	execPath     string
@@ -31,8 +36,8 @@ type Browser struct {
 	pid          int
 	isHeadless   bool
 
-	conn   *cdp.Conn       // this is the CDP connection
-	events chan *cdp.Event // CDP event channel
+	conn   *rpcc.Conn // this is the CDP connection
+	events chan *CDPEvent
 }
 
 func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
@@ -68,7 +73,7 @@ func (b *Browser) launch(startURL string) error {
 		args = append(args, "--headless=new")
 	}
 
-	b.cmd = exec.CommandContext(b.wsConnext, b.execPath, args...)
+	b.cmd = exec.CommandContext(b.context, b.execPath, args...)
 	if err := b.cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start browser: %v", err)
 	}
