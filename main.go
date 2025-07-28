@@ -5,6 +5,6 @@ import (
 )
 
 func main() {
-	// examples.TestWaitForNetworkStability()
-	examples.TestHijackModifyRequest()
+	examples.TestWaitForNetworkStability()
+	// examples.TestHijackModifyRequest()
 }

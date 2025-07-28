@@ -13,7 +13,7 @@ func TestHijackRequests() error {
 	if !chromeInstalled {
 		return fmt.Errorf("Chrome not found in PATH")
 	}
-	b := browser.GreenLight(chromePath, false, "https://youtube.com")
+	b := browser.GreenLight(chromePath, false, "https://example.com")
 
 	if err := b.SendCommandWithoutResponse("Network.enable", nil); err != nil {
 		return fmt.Errorf("failed to enable network: %v", err)
@@ -39,7 +39,7 @@ func TestHijackRequests() error {
 	}()
 
 	page := b.NewPage()
-	page.Goto("https://youtube.com")
+	page.Goto("https://example.com")
 	page.YellowLight(5000)
 
 	b.RedLight()
@@ -73,7 +73,6 @@ func TestHijackModifyRequest() error {
 				headers := map[string]interface{}{
 					"X-My-Header": "ModifiedByHijack",
 				}
-				// Continue the request with modified headers
 				err := b.SendCommandWithoutResponse("Network.continueInterceptedRequest", map[string]interface{}{
 					"interceptionId": reqID,
 					"headers":        headers,
@@ -89,9 +88,9 @@ func TestHijackModifyRequest() error {
 
 	page := b.NewPage()
 	page.Goto("https://example.com")
-	page.YellowLight(5000000)
+	page.YellowLight(5000)
 
-	// b.RedLight()
+	b.RedLight()
 
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -114,8 +115,9 @@ func (b *Browser) attachToPage() error {
 			if wsURL, ok := page["webSocketDebuggerUrl"].(string); ok {
 				// Close existing connection if any
 				b.connMutex.Lock()
-				if b.conn != nil {
-					b.conn.Close()
+				oldConn := b.conn
+				if oldConn != nil {
+					oldConn.Close()
 					b.conn = nil
 				}
 				b.connMutex.Unlock()
@@ -130,7 +132,6 @@ func (b *Browser) attachToPage() error {
 					return fmt.Errorf("failed to connect to page WebSocket: %v", err)
 				}
 
-				// Set connection parameters
 				conn.SetReadLimit(512 * 1024) // 512KB limit
 				conn.SetPongHandler(func(string) error {
 					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
@@ -143,7 +144,7 @@ func (b *Browser) attachToPage() error {
 				b.connMutex.Unlock()
 
 				log.Printf("Connected to page: %s", page["url"])
-				b.startReader() // restart reader on new connection
+				b.startReader() // Only after a new connection is set!
 				return nil
 			}
 		}
@@ -270,10 +271,20 @@ func (b *Browser) startReader() {
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
-				conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+				// conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 				_, data, err := conn.ReadMessage()
 				if err != nil {
+					if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+						continue // just a timeout, keep waiting
+					}
 					log.Printf("WebSocket reader error: %v", err)
+					// Mark the connection as dead so no further reads happen
+					b.connMutex.Lock()
+					if b.conn == conn {
+						b.conn.Close()
+						b.conn = nil
+					}
+					b.connMutex.Unlock()
 					return
 				}
 				var msg map[string]interface{}
