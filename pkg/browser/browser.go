@@ -37,6 +37,11 @@ type Browser struct {
 
 	eventChan  chan Event
 	listenOnce sync.Once
+	connMutex  sync.RWMutex
+
+	responseChans map[int]chan map[string]interface{}
+	responseMutex sync.Mutex
+	readerCancel  context.CancelFunc
 }
 
 func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
@@ -60,7 +65,7 @@ func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
 }
 
 func (b *Browser) launch(startURL string) error {
-	debugPort := "9222"
+	debugPort := "9229"
 	args := []string{
 		"--remote-debugging-port=" + debugPort,
 		"--no-first-run",
@@ -86,13 +91,13 @@ func (b *Browser) launch(startURL string) error {
 		return err
 	}
 
-	b.startEventListener()
+	b.startReader()
 
 	return nil
 }
 
 func (b *Browser) attachToPage() error {
-	debugPort := "9222"
+	debugPort := "9229"
 	resp, err := http.Get(fmt.Sprintf("http://localhost:%s/json", debugPort))
 	if err != nil {
 		return fmt.Errorf("failed to fetch active pages: %v", err)
@@ -107,22 +112,62 @@ func (b *Browser) attachToPage() error {
 	for _, page := range pages {
 		if page["type"] == "page" && page["url"] != "" {
 			if wsURL, ok := page["webSocketDebuggerUrl"].(string); ok {
+				// Close existing connection if any
+				b.connMutex.Lock()
 				if b.conn != nil {
 					b.conn.Close()
+					b.conn = nil
 				}
-				conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+				b.connMutex.Unlock()
+
+				// Add connection timeout
+				dialer := websocket.Dialer{
+					HandshakeTimeout: 10 * time.Second,
+				}
+
+				conn, _, err := dialer.Dial(wsURL, nil)
 				if err != nil {
 					return fmt.Errorf("failed to connect to page WebSocket: %v", err)
 				}
+
+				// Set connection parameters
+				conn.SetReadLimit(512 * 1024) // 512KB limit
+				conn.SetPongHandler(func(string) error {
+					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+					return nil
+				})
+
+				b.connMutex.Lock()
 				b.conn = conn
 				b.wsEndpoint = wsURL
+				b.connMutex.Unlock()
+
 				log.Printf("Connected to page: %s", page["url"])
-				b.startEventListener()
+				b.startReader() // restart reader on new connection
 				return nil
 			}
 		}
 	}
 	return fmt.Errorf("no suitable page found")
+}
+
+func (b *Browser) ResetConnection() error {
+	if b.readerCancel != nil {
+		b.readerCancel()
+	}
+	b.connMutex.Lock()
+	if b.conn != nil {
+		b.conn.Close()
+		b.conn = nil
+	}
+	b.connMutex.Unlock()
+	return b.attachToPage()
+}
+
+func (b *Browser) getConnection() *websocket.Conn {
+	b.connMutex.RLock()
+	defer b.connMutex.RUnlock()
+	return b.conn
 }
 
 func (b *Browser) SendCommandWithResponse(method string, params map[string]interface{}) (map[string]interface{}, error) {
@@ -137,41 +182,40 @@ func (b *Browser) SendCommandWithResponse(method string, params map[string]inter
 		"params": params,
 	}
 
-	if b.conn == nil {
+	ch := make(chan map[string]interface{}, 1)
+	b.responseMutex.Lock()
+	if b.responseChans == nil {
+		b.responseChans = make(map[int]chan map[string]interface{})
+	}
+	b.responseChans[id] = ch
+	b.responseMutex.Unlock()
+
+	conn := b.getConnection()
+	if conn == nil {
 		if err := b.attachToPage(); err != nil {
 			return nil, fmt.Errorf("failed to reconnect WebSocket: %v", err)
 		}
+		conn = b.getConnection()
 	}
 
-	if err := b.conn.WriteJSON(message); err != nil {
+	if err := conn.WriteJSON(message); err != nil {
+		b.responseMutex.Lock()
+		delete(b.responseChans, id)
+		b.responseMutex.Unlock()
 		return nil, fmt.Errorf("failed to send WebSocket message: %v", err)
 	}
 
-	for {
-		_, data, err := b.conn.ReadMessage()
-		if err != nil {
-			return nil, fmt.Errorf("failed to read WebSocket message: %v", err)
-		}
-
-		var response map[string]interface{}
-		if err := json.Unmarshal(data, &response); err != nil {
-			log.Printf("Failed to parse WebSocket message: %s", string(data))
-			continue
-		}
-
-		// If it's an event, push to eventChan
-		if method, ok := response["method"].(string); ok {
-			params, _ := response["params"].(map[string]interface{})
-			select {
-			case b.eventChan <- Event{Method: method, Params: params}:
-			default:
-			}
-			continue
-		}
-
-		if responseID, ok := response["id"].(float64); ok && int(responseID) == id {
-			return response, nil
-		}
+	select {
+	case resp := <-ch:
+		b.responseMutex.Lock()
+		delete(b.responseChans, id)
+		b.responseMutex.Unlock()
+		return resp, nil
+	case <-time.After(30 * time.Second):
+		b.responseMutex.Lock()
+		delete(b.responseChans, id)
+		b.responseMutex.Unlock()
+		return nil, fmt.Errorf("timeout waiting for response to %s", method)
 	}
 }
 
@@ -187,13 +231,15 @@ func (b *Browser) SendCommandWithoutResponse(method string, params map[string]in
 		"params": params,
 	}
 
-	if b.conn == nil {
+	conn := b.getConnection()
+	if conn == nil {
 		if err := b.attachToPage(); err != nil {
 			return fmt.Errorf("failed to reconnect WebSocket: %v", err)
 		}
+		conn = b.getConnection()
 	}
 
-	if err := b.conn.WriteJSON(message); err != nil {
+	if err := conn.WriteJSON(message); err != nil {
 		return fmt.Errorf("failed to send WebSocket message: %v", err)
 	}
 
@@ -201,52 +247,75 @@ func (b *Browser) SendCommandWithoutResponse(method string, params map[string]in
 }
 
 func (b *Browser) Listen() Event {
-	b.startEventListener()
 	return <-b.eventChan
 }
 
-func (b *Browser) startEventListener() {
-	b.listenOnce.Do(func() {
-		go func() {
-			for {
-				if b.conn == nil {
+func (b *Browser) startReader() {
+	if b.readerCancel != nil {
+		b.readerCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	b.readerCancel = cancel
+	if b.responseChans == nil {
+		b.responseChans = make(map[int]chan map[string]interface{})
+	}
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				conn := b.getConnection()
+				if conn == nil {
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
-				_, data, err := b.conn.ReadMessage()
+				conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+				_, data, err := conn.ReadMessage()
 				if err != nil {
-					time.Sleep(100 * time.Millisecond)
-					continue
+					log.Printf("WebSocket reader error: %v", err)
+					return
 				}
 				var msg map[string]interface{}
 				if err := json.Unmarshal(data, &msg); err != nil {
+					log.Printf("Failed to parse WebSocket message: %s", string(data))
 					continue
 				}
-				if method, ok := msg["method"].(string); ok {
+				if id, ok := msg["id"].(float64); ok {
+					b.responseMutex.Lock()
+					ch, exists := b.responseChans[int(id)]
+					b.responseMutex.Unlock()
+					if exists {
+						ch <- msg
+					}
+				} else if method, ok := msg["method"].(string); ok {
 					params, _ := msg["params"].(map[string]interface{})
 					select {
 					case b.eventChan <- Event{Method: method, Params: params}:
 					default:
+						// log.Printf("Event channel full, dropping event: %s", method)
 					}
 				}
 			}
-		}()
-	})
+		}
+	}()
 }
 
 func (b *Browser) NewPage() *page.Page {
-	if b.conn == nil {
+	if b.getConnection() == nil {
 		log.Fatal("WebSocket connection not established. Cannot create a new page.")
 	}
 	return page.NewPage(b)
 }
 
 func (b *Browser) RedLight() {
+	b.connMutex.Lock()
 	if b.conn != nil {
 		if err := b.conn.Close(); err != nil {
 			log.Printf("Error closing WebSocket: %v", err)
 		}
 	}
+	b.connMutex.Unlock()
 
 	if b.cmd != nil && b.cmd.Process != nil {
 		if err := b.cmd.Process.Kill(); err != nil {
