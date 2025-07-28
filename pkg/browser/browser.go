@@ -45,6 +45,8 @@ type Browser struct {
 	readerCancel  context.CancelFunc
 }
 
+const eventChanSize = 100
+
 func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
 	ctx, cancel := context.WithCancel(context.Background())
 	userDataDir := filepath.Join(os.TempDir(), fmt.Sprintf("greenlight_%s", uuid.New().String()))
@@ -55,7 +57,7 @@ func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
 		cancel:      cancel,
 		userDataDir: userDataDir,
 		isHeadless:  isHeadless,
-		eventChan:   make(chan Event, 100),
+		eventChan:   make(chan Event, eventChanSize),
 	}
 
 	if err := browser.launch(startURL); err != nil {
@@ -113,7 +115,6 @@ func (b *Browser) attachToPage() error {
 	for _, page := range pages {
 		if page["type"] == "page" && page["url"] != "" {
 			if wsURL, ok := page["webSocketDebuggerUrl"].(string); ok {
-				// Close existing connection if any
 				b.connMutex.Lock()
 				oldConn := b.conn
 				if oldConn != nil {
@@ -122,7 +123,6 @@ func (b *Browser) attachToPage() error {
 				}
 				b.connMutex.Unlock()
 
-				// Add connection timeout
 				dialer := websocket.Dialer{
 					HandshakeTimeout: 10 * time.Second,
 				}
@@ -132,7 +132,7 @@ func (b *Browser) attachToPage() error {
 					return fmt.Errorf("failed to connect to page WebSocket: %v", err)
 				}
 
-				conn.SetReadLimit(512 * 1024) // 512KB limit
+				conn.SetReadLimit(512 * 1024)
 				conn.SetPongHandler(func(string) error {
 					conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 					return nil
@@ -144,7 +144,7 @@ func (b *Browser) attachToPage() error {
 				b.connMutex.Unlock()
 
 				log.Printf("Connected to page: %s", page["url"])
-				b.startReader() // Only after a new connection is set!
+				b.startReader()
 				return nil
 			}
 		}
@@ -251,6 +251,17 @@ func (b *Browser) Listen() Event {
 	return <-b.eventChan
 }
 
+// dumpEventChan drains the event channel.
+func (b *Browser) dumpEventChan() {
+	for {
+		select {
+		case <-b.eventChan:
+		default:
+			return
+		}
+	}
+}
+
 func (b *Browser) startReader() {
 	if b.readerCancel != nil {
 		b.readerCancel()
@@ -271,14 +282,12 @@ func (b *Browser) startReader() {
 					time.Sleep(100 * time.Millisecond)
 					continue
 				}
-				// conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 				_, data, err := conn.ReadMessage()
 				if err != nil {
 					if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
-						continue // just a timeout, keep waiting
+						continue
 					}
 					log.Printf("WebSocket reader error: %v", err)
-					// Mark the connection as dead so no further reads happen
 					b.connMutex.Lock()
 					if b.conn == conn {
 						b.conn.Close()
@@ -304,7 +313,8 @@ func (b *Browser) startReader() {
 					select {
 					case b.eventChan <- Event{Method: method, Params: params}:
 					default:
-						// log.Printf("Event channel full, dropping event: %s", method)
+						b.dumpEventChan()
+						b.eventChan <- Event{Method: method, Params: params}
 					}
 				}
 			}
