@@ -5,5 +5,5 @@ import (
 )
 
 func main() {
-	examples.TestHijackRequests()
+	examples.TestHijackModifyRequest()
 }
