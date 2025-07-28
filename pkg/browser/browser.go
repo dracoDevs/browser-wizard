@@ -15,18 +15,17 @@ import (
 	"github.com/dracoDevs/browser-wizard/pkg/page"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/mafredri/cdp/rpcc"
 )
 
-type CDPEvent struct {
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
+type Event struct {
+	Method string                 `json:"method"`
+	Params map[string]interface{} `json:"params"`
 }
 
 type Browser struct {
 	execPath     string
 	wsEndpoint   string
-	wsConn       *websocket.Conn // renamed to avoid conflict
+	conn         *websocket.Conn
 	cmd          *exec.Cmd
 	context      context.Context
 	cancel       context.CancelFunc
@@ -36,8 +35,8 @@ type Browser struct {
 	pid          int
 	isHeadless   bool
 
-	conn   *rpcc.Conn // this is the CDP connection
-	events chan *CDPEvent
+	eventChan  chan Event
+	listenOnce sync.Once
 }
 
 func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
@@ -50,6 +49,7 @@ func GreenLight(execPath string, isHeadless bool, startURL string) *Browser {
 		cancel:      cancel,
 		userDataDir: userDataDir,
 		isHeadless:  isHeadless,
+		eventChan:   make(chan Event, 100),
 	}
 
 	if err := browser.launch(startURL); err != nil {
@@ -86,6 +86,8 @@ func (b *Browser) launch(startURL string) error {
 		return err
 	}
 
+	b.startEventListener()
+
 	return nil
 }
 
@@ -105,22 +107,24 @@ func (b *Browser) attachToPage() error {
 	for _, page := range pages {
 		if page["type"] == "page" && page["url"] != "" {
 			if wsURL, ok := page["webSocketDebuggerUrl"].(string); ok {
-				if b.wsConn != nil {
-					b.wsConn.Close()
+				if b.conn != nil {
+					b.conn.Close()
 				}
 				conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 				if err != nil {
 					return fmt.Errorf("failed to connect to page WebSocket: %v", err)
 				}
-				b.wsConn = conn
+				b.conn = conn
 				b.wsEndpoint = wsURL
 				log.Printf("Connected to page: %s", page["url"])
+				b.startEventListener()
 				return nil
 			}
 		}
 	}
 	return fmt.Errorf("no suitable page found")
 }
+
 func (b *Browser) SendCommandWithResponse(method string, params map[string]interface{}) (map[string]interface{}, error) {
 	b.messageMutex.Lock()
 	b.messageID++
@@ -133,18 +137,18 @@ func (b *Browser) SendCommandWithResponse(method string, params map[string]inter
 		"params": params,
 	}
 
-	if b.wsConn == nil {
+	if b.conn == nil {
 		if err := b.attachToPage(); err != nil {
 			return nil, fmt.Errorf("failed to reconnect WebSocket: %v", err)
 		}
 	}
 
-	if err := b.wsConn.WriteJSON(message); err != nil {
+	if err := b.conn.WriteJSON(message); err != nil {
 		return nil, fmt.Errorf("failed to send WebSocket message: %v", err)
 	}
 
 	for {
-		_, data, err := b.wsConn.ReadMessage()
+		_, data, err := b.conn.ReadMessage()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read WebSocket message: %v", err)
 		}
@@ -152,6 +156,16 @@ func (b *Browser) SendCommandWithResponse(method string, params map[string]inter
 		var response map[string]interface{}
 		if err := json.Unmarshal(data, &response); err != nil {
 			log.Printf("Failed to parse WebSocket message: %s", string(data))
+			continue
+		}
+
+		// If it's an event, push to eventChan
+		if method, ok := response["method"].(string); ok {
+			params, _ := response["params"].(map[string]interface{})
+			select {
+			case b.eventChan <- Event{Method: method, Params: params}:
+			default:
+			}
 			continue
 		}
 
@@ -173,29 +187,63 @@ func (b *Browser) SendCommandWithoutResponse(method string, params map[string]in
 		"params": params,
 	}
 
-	if b.wsConn == nil {
+	if b.conn == nil {
 		if err := b.attachToPage(); err != nil {
 			return fmt.Errorf("failed to reconnect WebSocket: %v", err)
 		}
 	}
 
-	if err := b.wsConn.WriteJSON(message); err != nil {
+	if err := b.conn.WriteJSON(message); err != nil {
 		return fmt.Errorf("failed to send WebSocket message: %v", err)
 	}
 
 	return nil
 }
 
+func (b *Browser) Listen() Event {
+	b.startEventListener()
+	return <-b.eventChan
+}
+
+func (b *Browser) startEventListener() {
+	b.listenOnce.Do(func() {
+		go func() {
+			for {
+				if b.conn == nil {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				_, data, err := b.conn.ReadMessage()
+				if err != nil {
+					time.Sleep(100 * time.Millisecond)
+					continue
+				}
+				var msg map[string]interface{}
+				if err := json.Unmarshal(data, &msg); err != nil {
+					continue
+				}
+				if method, ok := msg["method"].(string); ok {
+					params, _ := msg["params"].(map[string]interface{})
+					select {
+					case b.eventChan <- Event{Method: method, Params: params}:
+					default:
+					}
+				}
+			}
+		}()
+	})
+}
+
 func (b *Browser) NewPage() *page.Page {
-	if b.wsConn == nil {
+	if b.conn == nil {
 		log.Fatal("WebSocket connection not established. Cannot create a new page.")
 	}
 	return page.NewPage(b)
 }
 
 func (b *Browser) RedLight() {
-	if b.wsConn != nil {
-		if err := b.wsConn.Close(); err != nil {
+	if b.conn != nil {
+		if err := b.conn.Close(); err != nil {
 			log.Printf("Error closing WebSocket: %v", err)
 		}
 	}
@@ -216,8 +264,4 @@ func (b *Browser) RedLight() {
 
 	b.cancel()
 	log.Println("Browser closed successfully.")
-}
-
-func (b *Browser) Listen() *CDPEvent {
-	return <-b.events
 }
