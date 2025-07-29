@@ -484,7 +484,7 @@ func (b *Browser) checkForNewIframes() {
 						conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 						return nil
 					})
-					b.Iframes[wsURL] = conn
+					b.Iframes[url] = conn
 					log.Printf("Connected to new iframe: %s", url)
 				} else {
 					log.Printf("Failed to connect to iframe WebSocket: %v", err)
