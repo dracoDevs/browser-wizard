@@ -474,7 +474,7 @@ func (b *Browser) checkForNewIframes() {
 
 		if pageType == "iframe" && wsURL != "" {
 			// Check if we already have a connection to this iframe
-			if _, exists := b.Iframes[wsURL]; !exists {
+			if _, exists := b.Iframes[url]; !exists {
 				// New iframe found, connect to it
 				dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
 				conn, _, err := dialer.Dial(wsURL, nil)
