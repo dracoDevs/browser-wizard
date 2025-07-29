@@ -485,7 +485,6 @@ func (b *Browser) checkForNewIframes() {
 						return nil
 					})
 					b.Iframes[url] = conn
-					log.Printf("Connected to new iframe: %s", url)
 				} else {
 					log.Printf("Failed to connect to iframe WebSocket: %v", err)
 				}
