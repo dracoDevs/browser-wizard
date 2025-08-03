@@ -492,16 +492,14 @@ func (b *Browser) checkForNewIframes() {
 		}
 	}
 
-	// Clean up disconnected iframes
 	for wsURL, conn := range b.Iframes {
 		if conn == nil {
 			delete(b.Iframes, wsURL)
 			continue
 		}
 
-		// Check if connection is still alive
 		if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(time.Second)); err != nil {
-			log.Printf("Iframe connection lost, removing: %s", wsURL)
+			// log.Printf("Iframe connection lost, removing: %s", wsURL)
 			conn.Close()
 			delete(b.Iframes, wsURL)
 		}
