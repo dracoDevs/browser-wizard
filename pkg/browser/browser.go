@@ -104,7 +104,11 @@ func (b *Browser) setupProxyAuth() {
 		"handleAuthRequests": true,
 	})
 	go func() {
+		authPassed := false
 		for ev := range b.eventChan {
+			if authPassed {
+				continue
+			}
 			reqID, _ := ev.Params["requestId"].(string)
 			switch ev.Method {
 			case "Fetch.requestPaused":
@@ -120,6 +124,8 @@ func (b *Browser) setupProxyAuth() {
 						"password": b.proxyPassword,
 					},
 				})
+				_ = b.SendCommandWithoutResponse("Fetch.disable", nil)
+				authPassed = true
 			}
 		}
 	}()
