@@ -10,34 +10,42 @@ import (
 )
 
 func WaitForNetworkStability(b *browser.Browser) error {
-	var lastVal interface{}
-	var stableSince time.Time
-	const stableDuration = time.Second + 500*time.Millisecond
-
 	for {
-		res, err := b.SendCommandWithResponse("Runtime.evaluate", map[string]interface{}{
-			"expression": `(function() {
-                const entries = performance.getEntriesByType("resource");
-                return entries.filter(e => e.initiatorType === "xmlhttprequest" || e.initiatorType === "fetch").length;
-            })()`,
-			"returnByValue": true,
-		})
-		if err != nil {
-			return fmt.Errorf("error evaluating script: %v", err)
-		}
-
-		parentVal := res["result"].(map[string]interface{})
-		subparentVal := parentVal["result"].(map[string]interface{})
-		val := subparentVal["value"]
-
-		if lastVal == nil || val != lastVal {
-			lastVal = val
-			stableSince = time.Now()
-		} else if time.Since(stableSince) >= stableDuration {
+		if browser.ProxyHandled {
 			break
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
+
+	_ = b.SendCommandWithoutResponse("Fetch.enable", nil)
+
+	const stableDuration = time.Second + 500*time.Millisecond
+	const pollInterval = 300 * time.Millisecond
+
+	lastRequestPaused := time.Now()
+	done := make(chan struct{})
+
+	go func() {
+		for ev := range b.EventChan {
+			switch ev.Method {
+			case "Fetch.requestPaused":
+				lastRequestPaused = time.Now()
+				reqID, _ := ev.Params["requestId"].(string)
+				_, _ = b.SendCommandWithResponse("Fetch.continueRequest", map[string]interface{}{
+					"requestId": reqID,
+				})
+			}
+		}
+	}()
+
+	for {
+		if time.Since(lastRequestPaused) >= stableDuration {
+			break
+		}
+		time.Sleep(pollInterval)
+	}
+
+	close(done)
 	return nil
 }
 
@@ -48,10 +56,6 @@ func TestWaitForNetworkStability() error {
 	}
 
 	b := browser.GreenLight(chromePath, false, "https://x.com", browser.Proxy{})
-
-	if err := b.SendCommandWithoutResponse("Network.enable", nil); err != nil {
-		return fmt.Errorf("failed to enable network: %v", err)
-	}
 
 	page := b.NewPage()
 	page.Goto("https://x.com")

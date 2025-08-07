@@ -40,7 +40,7 @@ type Browser struct {
 	isHeadless          bool
 	messageID           int
 	messageMutex        sync.Mutex
-	eventChan           chan Event
+	EventChan           chan Event
 	responseChans       map[int]chan map[string]interface{}
 	responseMutex       sync.Mutex
 	readerCancel        context.CancelFunc
@@ -52,8 +52,10 @@ type Browser struct {
 	proxyPassword       string
 }
 
+var ProxyHandled bool = false
+
 func (b *Browser) Listen() Event {
-	return <-b.eventChan
+	return <-b.EventChan
 }
 
 func (b *Browser) GetIframeConnections() []string {
@@ -104,11 +106,7 @@ func (b *Browser) setupProxyAuth() {
 		"handleAuthRequests": true,
 	})
 	go func() {
-		authPassed := false
-		for ev := range b.eventChan {
-			if authPassed {
-				continue
-			}
+		for ev := range b.EventChan {
 			reqID, _ := ev.Params["requestId"].(string)
 			switch ev.Method {
 			case "Fetch.requestPaused":
@@ -124,8 +122,9 @@ func (b *Browser) setupProxyAuth() {
 						"password": b.proxyPassword,
 					},
 				})
+				ProxyHandled = true
 				_ = b.SendCommandWithoutResponse("Fetch.disable", nil)
-				authPassed = true
+				return
 			}
 		}
 	}()
@@ -139,9 +138,13 @@ func (b *Browser) launch(startURL string, proxy Proxy) error {
 		"--user-data-dir=" + b.userDataDir,
 		"--remote-allow-origins=*",
 	}
+
 	if proxy.URL != "" {
 		args = append(args, "--proxy-server="+proxy.URL)
+	} else {
+		ProxyHandled = true
 	}
+
 	if b.isHeadless {
 		args = append(args, "--headless=new")
 	}
@@ -161,7 +164,6 @@ func (b *Browser) launch(startURL string, proxy Proxy) error {
 	if startURL != "" {
 		_ = b.SendCommandWithoutResponse("Page.enable", nil)
 		_ = b.SendCommandWithoutResponse("Page.navigate", map[string]interface{}{"url": startURL})
-		_ = b.SendCommandWithoutResponse("Network.enable", nil)
 	}
 	b.startIframeMonitor()
 	return nil
@@ -230,7 +232,7 @@ func GreenLight(execPath string, isHeadless bool, startURL string, proxy Proxy) 
 		isHeadless:    isHeadless,
 		proxyUsername: proxy.User,
 		proxyPassword: proxy.Password,
-		eventChan:     make(chan Event, 100),
+		EventChan:     make(chan Event, 100),
 		responseChans: make(map[int]chan map[string]interface{}),
 	}
 	if err := b.launch(startURL, proxy); err != nil {
@@ -329,7 +331,7 @@ func (b *Browser) startReader() {
 				} else if m, ok := msg["method"].(string); ok {
 					params, _ := msg["params"].(map[string]interface{})
 					select {
-					case b.eventChan <- Event{Method: m, Params: params}:
+					case b.EventChan <- Event{Method: m, Params: params}:
 					default:
 					}
 				}
