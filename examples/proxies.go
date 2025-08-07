@@ -1,7 +1,6 @@
 package examples
 
 import (
-	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -24,8 +23,6 @@ func proxyPieces(raw string) (urlOnly, user, pass string) {
 func TestProxyUsage() {
 	raw := "YOUR_PROXY_HERE"
 	proxyURL, user, password := proxyPieces(raw)
-
-	fmt.Println("Using proxy:", proxyURL)
 
 	chromePath, ok := launcher.LookPath()
 	if !ok {
