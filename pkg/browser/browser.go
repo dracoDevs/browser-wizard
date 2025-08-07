@@ -159,9 +159,9 @@ func (b *Browser) launch(startURL string, proxy Proxy) error {
 	}
 	b.setupProxyAuth()
 	if startURL != "" {
-		_ = b.SendCommandWithoutResponse("Network.enable", nil)
 		_ = b.SendCommandWithoutResponse("Page.enable", nil)
 		_ = b.SendCommandWithoutResponse("Page.navigate", map[string]interface{}{"url": startURL})
+		_ = b.SendCommandWithoutResponse("Network.enable", nil)
 	}
 	b.startIframeMonitor()
 	return nil
