@@ -16,7 +16,7 @@ func TestIframeMonitoring() error {
 	}
 
 	// Start browser with a site that might have iframes
-	b := browser.GreenLight(chromePath, false, "https://x.com")
+	b := browser.GreenLight(chromePath, false, "https://x.com", browser.Proxy{})
 
 	// Enable network monitoring
 	if err := b.SendCommandWithoutResponse("Network.enable", nil); err != nil {
@@ -63,7 +63,7 @@ func TestIframeWithDynamicContent() error {
 	}
 
 	// Use a site that dynamically loads iframes
-	b := browser.GreenLight(chromePath, false, "https://www.google.com")
+	b := browser.GreenLight(chromePath, false, "https://www.google.com", browser.Proxy{})
 
 	if err := b.SendCommandWithoutResponse("Network.enable", nil); err != nil {
 		return fmt.Errorf("failed to enable network: %v", err)

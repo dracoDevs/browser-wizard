@@ -47,7 +47,7 @@ func TestWaitForNetworkStability() error {
 		return fmt.Errorf("Chrome not found in PATH")
 	}
 
-	b := browser.GreenLight(chromePath, false, "https://x.com")
+	b := browser.GreenLight(chromePath, false, "https://x.com", browser.Proxy{})
 
 	if err := b.SendCommandWithoutResponse("Network.enable", nil); err != nil {
 		return fmt.Errorf("failed to enable network: %v", err)

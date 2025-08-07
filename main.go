@@ -5,5 +5,5 @@ import (
 )
 
 func main() {
-	examples.TestIframeMonitoring()
+	examples.TestProxyUsage()
 }
